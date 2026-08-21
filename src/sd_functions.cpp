@@ -58,8 +58,16 @@ bool setupSdCard() {
     if (!SDM.begin(_cs, sdcardSPI))
 #else
     sdcardSPI.begin(_sck, _miso, _mosi, _cs); // start SPI communications
-    vTaskDelay(pdTICKS_TO_MS(10));
-    if (!SDM.begin(_cs, sdcardSPI))
+    // Some SPI SD cards (notably the M5Stack Tab5) intermittently miss the first
+    // init after a warm reset and report "Failed to mount SDCARD". Retry a few
+    // times with a short settle delay before giving up so a good card mounts
+    // reliably on boot.
+    bool _sdMountOk = false;
+    for (int _sdTry = 0; _sdTry < 6 && !_sdMountOk; ++_sdTry) {
+        vTaskDelay(pdMS_TO_TICKS(_sdTry == 0 ? 10 : 120));
+        _sdMountOk = SDM.begin(_cs, sdcardSPI);
+    }
+    if (!_sdMountOk)
 #endif
     {
         // sdcardSPI.end(); // Closes SPI connections and release pin header.
