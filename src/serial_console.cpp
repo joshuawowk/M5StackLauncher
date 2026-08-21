@@ -845,7 +845,7 @@ static void printHelp() {
     launcherConsolePrintln("  partition create <type> <subtype> <label> <size>");
     launcherConsolePrintln("  flash firmware <name> <size>");
     launcherConsolePrintln("  sdput <sdpath> <size>");
-    launcherConsolePrintln("  sdinstall <sdpath>");
+    launcherConsolePrintln("  sdinstall <sdpath> [--data=yes|no] [--restore=yes|no]");
     launcherConsolePrintln("  wifi auto");
     launcherConsolePrintln("  wifi scan");
     launcherConsolePrintln("  wifi connect <SSID> [PWD]");
@@ -930,13 +930,30 @@ static void handleSdPutCommand(const String &sdPath, uint32_t size) {
     launcherConsolePrintf("OK stored %s (%u bytes)\n", path.c_str(), static_cast<unsigned>(written));
 }
 
-// sdinstall <sdpath>: install a firmware .bin already on the SD through the same
+// Parses a yes/no option value. Sets invalid on anything else so the caller can
+// reject the command rather than silently installing with the wrong semantics.
+static bool parseYesNo(const String &value, bool fallback, bool &invalid) {
+    if (value.equalsIgnoreCase("yes") || value.equalsIgnoreCase("y") || value == "1") return true;
+    if (value.equalsIgnoreCase("no") || value.equalsIgnoreCase("n") || value == "0") return false;
+    invalid = true;
+    return fallback;
+}
+
+// sdinstall <sdpath> [--data=yes|no] [--restore=yes|no]: install a firmware .bin
+// already on the SD through the same
 // path the SD file browser's "Install" action uses (updateFromSD) — it parses the
 // embedded partition table of a full-flash factory image, lays out app + data
 // partitions, flashes them and reboots into the app. Unlike "flash firmware" this
 // creates the app's SPIFFS/FAT/LittleFS data partitions. On success the device
 // reboots into the app (this command never returns); on failure it prints an error.
-static void handleSdInstallCommand(const String &sdPath) {
+//
+// updateFromSD() is driven non-interactively here. Both of its prompts call
+// loopOptions(), which spins until physical touch or keyboard input; since this
+// command runs on the serial console task -- the only task that drains Serial, and
+// the one that would service a "nav" command -- a prompt raised from here freezes
+// the console for good, emitting neither OK nor ERR. Defaults are copy-the-image's-
+// data and fresh-install; --data/--restore override per call.
+static void handleSdInstallCommand(const String &sdPath, const SdInstallOptions &installOptions) {
     String path = sdPath;
     if (!path.startsWith("/")) path = "/" + path;
     if (!setupSdCard()) {
@@ -949,7 +966,7 @@ static void handleSdInstallCommand(const String &sdPath) {
     }
     launcherConsolePrintf("Installing %s from SD ...\n", path.c_str());
     launcherConsoleFlush();
-    updateFromSD(path); // reboots into the app on success; returns only on failure
+    updateFromSD(path, installOptions); // reboots into the app on success; returns only on failure
     launcherConsolePrintln("ERR install did not complete");
 }
 
@@ -973,7 +990,25 @@ static void handleSerialCommand(const String &line) {
     } else if (cmd.equalsIgnoreCase("sdput") && tokens.size() >= 3) {
         handleSdPutCommand(tokens[1], parseNumber(tokens[2]));
     } else if (cmd.equalsIgnoreCase("sdinstall") && tokens.size() >= 2) {
-        handleSdInstallCommand(tokens[1]);
+        SdInstallOptions installOptions;
+        installOptions.interactive = false;
+        bool badFlag = false;
+        for (size_t i = 2; i < tokens.size(); ++i) {
+            const String &flag = tokens[i];
+            if (flag.startsWith("--data=")) {
+                installOptions.copyData = parseYesNo(flag.substring(7), installOptions.copyData, badFlag);
+            } else if (flag.startsWith("--restore=")) {
+                installOptions.restoreBackup =
+                    parseYesNo(flag.substring(10), installOptions.restoreBackup, badFlag);
+            } else {
+                badFlag = true;
+            }
+            if (badFlag) {
+                launcherConsolePrintf("ERR bad option: %s\n", flag.c_str());
+                return;
+            }
+        }
+        handleSdInstallCommand(tokens[1], installOptions);
     } else if (cmd.equalsIgnoreCase("wifi") && tokens.size() >= 2) {
         handleWifiCommand(tokens);
     } else if (cmd.equalsIgnoreCase("help")) {
